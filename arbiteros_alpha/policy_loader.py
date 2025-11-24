@@ -334,35 +334,208 @@ class PolicyLoader:
         return result
 
     @classmethod
+    def load_from_python_file(cls, file_path: str | pathlib.Path) -> dict[str, Any]:
+        """Load policy instances from a Python file.
+
+        The Python file should define a function `get_policies()` that returns
+        a dictionary with policy instances, or directly define policy instances
+        in a `POLICIES` dictionary.
+
+        Args:
+            file_path: Path to the Python policy file.
+
+        Returns:
+            Dictionary containing loaded policies with keys:
+            - policy_checkers: List of PolicyChecker instances
+            - policy_routers: List of PolicyRouter instances
+            - graph_structure_checkers: List of GraphStructurePolicyChecker instances
+
+        Raises:
+            FileNotFoundError: If the policy file does not exist.
+            ImportError: If the Python file cannot be imported.
+            ValueError: If the policy configuration is invalid.
+        """
+        import importlib.util
+
+        file_path = pathlib.Path(file_path)
+        if not file_path.exists():
+            logger.warning(f"Policy Python file not found: {file_path}")
+            return {
+                "policy_checkers": [],
+                "policy_routers": [],
+                "graph_structure_checkers": [],
+            }
+
+        # Load the Python module
+        spec = importlib.util.spec_from_file_location("custom_policy", file_path)
+        if spec is None or spec.loader is None:
+            raise ValueError(f"Cannot load policy file: {file_path}")
+
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        # Try to get policies from get_policies() function or POLICIES dict
+        if hasattr(module, "get_policies"):
+            policies = module.get_policies()
+        elif hasattr(module, "POLICIES"):
+            policies = module.POLICIES
+        else:
+            logger.warning(
+                f"Policy file {file_path} does not define get_policies() or POLICIES"
+            )
+            return {
+                "policy_checkers": [],
+                "policy_routers": [],
+                "graph_structure_checkers": [],
+            }
+
+        # Normalize the policies dictionary
+        result = {
+            "policy_checkers": [],
+            "policy_routers": [],
+            "graph_structure_checkers": [],
+        }
+
+        if isinstance(policies, dict):
+            result["policy_checkers"] = policies.get("policy_checkers", [])
+            result["policy_routers"] = policies.get("policy_routers", [])
+            result["graph_structure_checkers"] = policies.get(
+                "graph_structure_checkers", []
+            )
+        else:
+            logger.error(f"Invalid policy format in {file_path}: expected dict")
+            return result
+
+        # Validate that all items are policy instances
+        for checker in result["policy_checkers"]:
+            if not isinstance(checker, PolicyChecker):
+                logger.error(
+                    f"Invalid policy checker in {file_path}: {type(checker)}"
+                )
+                result["policy_checkers"].remove(checker)
+
+        for router in result["policy_routers"]:
+            if not isinstance(router, PolicyRouter):
+                logger.error(f"Invalid policy router in {file_path}: {type(router)}")
+                result["policy_routers"].remove(router)
+
+        for checker in result["graph_structure_checkers"]:
+            if not isinstance(checker, GraphStructurePolicyChecker):
+                logger.error(
+                    f"Invalid graph structure checker in {file_path}: {type(checker)}"
+                )
+                result["graph_structure_checkers"].remove(checker)
+
+        return result
+
+    @classmethod
+    def _detect_conflicts(
+        cls, kernel_policies: dict[str, Any], custom_policies: dict[str, Any]
+    ) -> list[str]:
+        """Detect conflicts between kernel and custom policies.
+
+        A conflict occurs when a custom policy has the same name as a kernel policy
+        of the same type. Kernel policies cannot be overridden.
+
+        Args:
+            kernel_policies: Dictionary of kernel policies.
+            custom_policies: Dictionary of custom policies.
+
+        Returns:
+            List of conflict warning messages.
+        """
+        conflicts = []
+
+        # Check policy checkers
+        kernel_checker_names = {
+            checker.name for checker in kernel_policies["policy_checkers"]
+        }
+        custom_checker_names = {
+            checker.name for checker in custom_policies["policy_checkers"]
+        }
+        conflicting_checkers = kernel_checker_names & custom_checker_names
+        if conflicting_checkers:
+            conflicts.append(
+                f"Policy checker name conflict(s): {conflicting_checkers}. "
+                "Custom policies cannot override kernel policies. "
+                "Please rename your custom policy checkers."
+            )
+
+        # Check policy routers
+        kernel_router_names = {
+            router.name for router in kernel_policies["policy_routers"]
+        }
+        custom_router_names = {
+            router.name for router in custom_policies["policy_routers"]
+        }
+        conflicting_routers = kernel_router_names & custom_router_names
+        if conflicting_routers:
+            conflicts.append(
+                f"Policy router name conflict(s): {conflicting_routers}. "
+                "Custom policies cannot override kernel policies. "
+                "Please rename your custom policy routers."
+            )
+
+        # Check graph structure checkers (check blacklist names)
+        kernel_blacklist_names = set()
+        for checker in kernel_policies["graph_structure_checkers"]:
+            kernel_blacklist_names.update(checker.blacklist.values())
+
+        custom_blacklist_names = set()
+        for checker in custom_policies["graph_structure_checkers"]:
+            custom_blacklist_names.update(checker.blacklist.values())
+
+        conflicting_blacklists = kernel_blacklist_names & custom_blacklist_names
+        if conflicting_blacklists:
+            conflicts.append(
+                f"Graph structure checker blacklist name conflict(s): {conflicting_blacklists}. "
+                "Custom policies cannot override kernel policies. "
+                "Please rename your custom blacklist rules."
+            )
+
+        return conflicts
+
+    @classmethod
     def load_kernel_and_custom_policies(
         cls,
         kernel_policy_path: str | pathlib.Path | None = None,
-        custom_policy_path: str | pathlib.Path | None = None,
+        custom_policy_yaml_path: str | pathlib.Path | None = None,
+        custom_policy_python_path: str | pathlib.Path | None = None,
     ) -> dict[str, Any]:
         """Load policies from both kernel and custom policy files.
 
         Kernel policies are loaded first, then custom policies. Custom policies
-        can extend kernel policies but cannot override them (both are applied).
+        can extend kernel policies but cannot override them (conflicts are detected
+        and reported). Supports both YAML and Python custom policy files.
 
         Args:
             kernel_policy_path: Path to kernel policy file. If None, uses default
                 location: arbiteros_alpha/kernel_policy_list.yaml
-            custom_policy_path: Path to custom policy file. If None, uses default
+            custom_policy_yaml_path: Path to custom policy YAML file. If None, uses default
                 location: examples/custom_policy_list.yaml
+            custom_policy_python_path: Path to custom policy Python file. If None, tries
+                to find: examples/custom_policy.py
 
         Returns:
             Dictionary containing all loaded policies with keys:
             - policy_checkers: List of PolicyChecker instances
             - policy_routers: List of PolicyRouter instances
             - graph_structure_checkers: List of GraphStructurePolicyChecker instances
+
+        Raises:
+            RuntimeError: If conflicts are detected between kernel and custom policies.
         """
         # Default paths
         if kernel_policy_path is None:
             kernel_policy_path = pathlib.Path(__file__).parent / "kernel_policy_list.yaml"
-        if custom_policy_path is None:
+        if custom_policy_yaml_path is None:
             # Try to find custom_policy_list.yaml in examples directory
             examples_dir = pathlib.Path(__file__).parent.parent / "examples"
-            custom_policy_path = examples_dir / "custom_policy_list.yaml"
+            custom_policy_yaml_path = examples_dir / "custom_policy_list.yaml"
+        if custom_policy_python_path is None:
+            # Try to find custom_policy.py in examples directory
+            examples_dir = pathlib.Path(__file__).parent.parent / "examples"
+            custom_policy_python_path = examples_dir / "custom_policy.py"
 
         result = {
             "policy_checkers": [],
@@ -379,9 +552,46 @@ class PolicyLoader:
             kernel_policies["graph_structure_checkers"]
         )
 
-        # Load custom policies (developer-defined, can extend kernel policies)
-        logger.info(f"Loading custom policies from: {custom_policy_path}")
-        custom_policies = cls.load_from_file(custom_policy_path)
+        # Load custom policies from YAML (if exists)
+        custom_policies_yaml = {
+            "policy_checkers": [],
+            "policy_routers": [],
+            "graph_structure_checkers": [],
+        }
+        if pathlib.Path(custom_policy_yaml_path).exists():
+            logger.info(f"Loading custom policies from YAML: {custom_policy_yaml_path}")
+            custom_policies_yaml = cls.load_from_file(custom_policy_yaml_path)
+
+        # Load custom policies from Python (if exists)
+        custom_policies_python = {
+            "policy_checkers": [],
+            "policy_routers": [],
+            "graph_structure_checkers": [],
+        }
+        if pathlib.Path(custom_policy_python_path).exists():
+            logger.info(
+                f"Loading custom policies from Python: {custom_policy_python_path}"
+            )
+            custom_policies_python = cls.load_from_python_file(custom_policy_python_path)
+
+        # Merge custom policies (YAML and Python)
+        custom_policies = {
+            "policy_checkers": custom_policies_yaml["policy_checkers"]
+            + custom_policies_python["policy_checkers"],
+            "policy_routers": custom_policies_yaml["policy_routers"]
+            + custom_policies_python["policy_routers"],
+            "graph_structure_checkers": custom_policies_yaml["graph_structure_checkers"]
+            + custom_policies_python["graph_structure_checkers"],
+        }
+
+        # Detect conflicts
+        conflicts = cls._detect_conflicts(kernel_policies, custom_policies)
+        if conflicts:
+            error_msg = "Policy conflicts detected:\n" + "\n".join(f"  - {c}" for c in conflicts)
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+
+        # Merge custom policies into result
         result["policy_checkers"].extend(custom_policies["policy_checkers"])
         result["policy_routers"].extend(custom_policies["policy_routers"])
         result["graph_structure_checkers"].extend(

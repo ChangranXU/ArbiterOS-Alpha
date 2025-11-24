@@ -132,20 +132,24 @@ class ArbiterOSAlpha:
     def load_policies(
         self,
         kernel_policy_path: str | None = None,
-        custom_policy_path: str | None = None,
+        custom_policy_yaml_path: str | None = None,
+        custom_policy_python_path: str | None = None,
     ) -> None:
-        """Load policies from YAML files and register them.
+        """Load policies from YAML and Python files and register them.
 
         This method loads policies from both kernel policy files (read-only,
         defined by the kernel) and custom policy files (developer-defined).
         Kernel policies are loaded first, then custom policies. Both sets
-        of policies are applied.
+        of policies are applied. Conflicts between kernel and custom policies
+        are detected and reported.
 
         Args:
             kernel_policy_path: Optional path to kernel policy file.
                 If None, uses default: arbiteros_alpha/kernel_policy_list.yaml
-            custom_policy_path: Optional path to custom policy file.
+            custom_policy_yaml_path: Optional path to custom policy YAML file.
                 If None, uses default: examples/custom_policy_list.yaml
+            custom_policy_python_path: Optional path to custom policy Python file.
+                If None, tries to find: examples/custom_policy.py
 
         Example:
             >>> os = ArbiterOSAlpha()
@@ -154,12 +158,17 @@ class ArbiterOSAlpha:
             >>> # Or specify custom paths
             >>> os.load_policies(
             ...     kernel_policy_path="path/to/kernel_policies.yaml",
-            ...     custom_policy_path="path/to/custom_policies.yaml"
+            ...     custom_policy_yaml_path="path/to/custom_policies.yaml",
+            ...     custom_policy_python_path="path/to/custom_policy.py"
             ... )
+
+        Raises:
+            RuntimeError: If conflicts are detected between kernel and custom policies.
         """
         policies = PolicyLoader.load_kernel_and_custom_policies(
             kernel_policy_path=kernel_policy_path,
-            custom_policy_path=custom_policy_path,
+            custom_policy_yaml_path=custom_policy_yaml_path,
+            custom_policy_python_path=custom_policy_python_path,
         )
 
         # Register all loaded policies

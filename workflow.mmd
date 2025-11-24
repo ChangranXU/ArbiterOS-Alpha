@@ -8,11 +8,11 @@ graph TD
     plan["plan<br/>(Generate)"]
     reason["reason<br/>(Generate)"]
     report["report<br/>(Generate)"]
-    report --> End
     execute --> orchestrate
-    Start --> plan
     plan --> orchestrate
     reason --> decide_finish
+    Start --> plan
+    report --> End
     perceive --> reason
     orchestrate --> report
     orchestrate --> perceive

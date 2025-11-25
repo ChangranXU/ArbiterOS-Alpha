@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 from typing import List, Literal, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -16,7 +17,8 @@ logging.basicConfig(
     handlers=[RichHandler()],
 )
 
-
+GUI_POLICY_PATH = Path(__file__).with_name("custom_policy_list.yaml")
+GUI_POLICY_PY_PATH = Path(__file__).with_name("custom_policy.py")
 # 1) Setup OS
 os = ArbiterOSAlpha(validate_schemas=True)
 
@@ -25,7 +27,10 @@ os = ArbiterOSAlpha(validate_schemas=True)
 # Policies are defined in:
 # - arbiteros_alpha/kernel_policy_list.yaml (kernel-defined, read-only)
 # - examples/custom_policy_list.yaml (developer-defined, can be modified)
-os.load_policies()
+os.load_policies(
+    custom_policy_yaml_path=str(GUI_POLICY_PATH),
+    custom_policy_python_path=str(GUI_POLICY_PY_PATH),
+)
 
 
 class GUIState(TypedDict):

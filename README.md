@@ -1,4 +1,4 @@
-# ArbiterOS Alpha
+# ArbiterOS Alpha / xiangyu
 
 **Policy-driven governance layer for LangGraph**
 

@@ -29,7 +29,7 @@ os.load_policies()
 
 
 class GUIState(TypedDict):
-    """End-to-end GUI agent demo state.
+    """End-to-end GUI agent demo state with governance hooks.
 
     Fields:
         goal: The user's high-level objective.
@@ -41,6 +41,15 @@ class GUIState(TypedDict):
         confidence: Continuous score in [0, 1] estimating readiness/quality.
         done: Whether all subtasks are completed.
         history: Human-readable log of steps for demo output.
+        plan_confidence: Heuristic confidence score for the current plan.
+        needs_replan: Flag set by governance or execution to request replanning.
+        gui_ready_score: Proxy for perception readiness (1.0 means stable UI).
+        ui_blockers: List of blockers detected by perception (e.g., popups).
+        perception_latency: Simulated latency used to avoid stale screenshots.
+        reason_consistency: Score indicating whether reasoning aligns with plan.
+        execution_alignment: Alignment score between action intent and GUI state.
+        retry_count: Number of consecutive retries for the current subtask.
+        max_retries: Upper bound before escalation.
     """
 
     goal: str
@@ -52,6 +61,15 @@ class GUIState(TypedDict):
     confidence: float
     done: bool
     history: List[str]
+    plan_confidence: float
+    needs_replan: bool
+    gui_ready_score: float
+    ui_blockers: List[str]
+    perception_latency: float
+    reason_consistency: float
+    execution_alignment: float
+    retry_count: int
+    max_retries: int
 
 
 # 2) Nodes (Planner → Orchestrator → Perception → Reasoner → Decision/Execute loop → Report)
@@ -59,137 +77,221 @@ class GUIState(TypedDict):
 
 @os.instruction(Instr.GENERATE)
 def plan(state: GUIState) -> GUIState:
-    """Planner Module
-
-    Converts a user goal into a list of subtasks. This is intentionally simple:
-    - Splits on 'and' to simulate multi-step planning
-    - Falls back to a single-step plan if nothing to split
-    """
+    """Planner module that surfaces plan confidence for governance."""
     goal = (state.get("goal") or "").strip()
     if not goal:
         subtasks = []
     else:
-        raw_parts = [p.strip() for p in goal.split("and") if p.strip()]
+        raw_parts = [p.strip() for p in goal.replace("&", "and").split("and") if p.strip()]
         subtasks = raw_parts if raw_parts else [goal]
-    note = f"Plan created with {len(subtasks)} subtask(s): {subtasks}"
-    return {"subtasks": subtasks, "history": state["history"] + [note]}
+
+    unique_ratio = (len(set(subtasks)) / len(subtasks)) if subtasks else 0.0
+    coverage_bonus = 0.2 if (" and " in goal.lower() and len(subtasks) > 1) else 0.0
+    plan_confidence = min(0.95, 0.2 + 0.5 * bool(subtasks) + 0.2 * unique_ratio + coverage_bonus)
+    needs_replan = plan_confidence < 0.65
+
+    note = (
+        f"Plan created with {len(subtasks)} subtask(s): {subtasks} "
+        f"(confidence={plan_confidence:.2f}, needs_replan={needs_replan})"
+    )
+    return {
+        "subtasks": subtasks,
+        "plan_confidence": plan_confidence,
+        "needs_replan": needs_replan,
+        "history": state["history"] + [note],
+    }
 
 
 @os.instruction(Instr.GENERATE)
 def orchestrate(state: GUIState) -> GUIState:
-    """Orchestrator Module
-
-    Picks the next subtask to work on. Sets done=True if none remain.
-    """
+    """Orchestrator module with retry and replanning awareness."""
     remaining = [s for s in state["subtasks"] if s != state.get("current_subtask")]
-    # If current_subtask was completed earlier, drop it
-    if state.get("current_subtask") and state["current_subtask"] in remaining:
-        # keep it as current; otherwise choose a new one below
-        pass
+    retry_count = state.get("retry_count", 0)
+    max_retries = state.get("max_retries", 3)
+    history = state["history"]
 
-    next_subtask = ""
+    if retry_count >= max_retries:
+        note = (
+            f"Retry limit reached ({retry_count}/{max_retries}). "
+            "Escalating to planner."
+        )
+        return {
+            "needs_replan": True,
+            "retry_count": 0,
+            "current_subtask": "",
+            "history": history + [note],
+        }
+
     if not remaining and not state.get("current_subtask"):
-        # No tasks at all
         note = "No subtasks available. Nothing to do."
-        return {"done": True, "history": state["history"] + [note]}
+        return {"done": True, "history": history + [note]}
 
-    if not state.get("current_subtask"):
-        next_subtask = remaining[0] if remaining else ""
-    else:
-        next_subtask = state["current_subtask"]
-
+    next_subtask = state.get("current_subtask") or (remaining[0] if remaining else "")
     if not next_subtask:
         note = "All subtasks completed."
-        return {"done": True, "history": state["history"] + [note]}
+        return {"done": True, "history": history + [note]}
+
+    if state.get("needs_replan") and state.get("plan_confidence", 1.0) >= 0.65:
+        # Replanning request satisfied; allow orchestration to continue.
+        note = "Plan validated after replanning. Resuming execution."
+        return {
+            "needs_replan": False,
+            "history": history + [note],
+        }
 
     note = f"Selected subtask: {next_subtask}"
     return {
         "current_subtask": next_subtask,
         "done": False,
-        "history": state["history"] + [note],
+        "history": history + [note],
     }
 
 
 @os.instruction(Instr.TOOL_CALL)
 def perceive(state: GUIState) -> GUIState:
-    """Perception Module
+    """Perception module with blocker detection and readiness score."""
+    action_pending = bool(state.get("action"))
+    executed = state.get("executed", False)
+    retry_count = state.get("retry_count", 0)
 
-    Captures the 'current GUI state'. This demo simulates a stable GUI that is
-    always ready after execution settles.
-    """
-    simulated_gui: Literal["ready", "busy", "error"] = "ready"
-    note = f"Perceived GUI state: {simulated_gui}"
-    return {"gui_state": simulated_gui, "history": state["history"] + [note]}
+    if not executed and action_pending:
+        simulated_gui: Literal["ready", "busy", "error"] = "busy"
+        gui_ready_score = 0.6 - 0.05 * retry_count
+        ui_blockers = ["pending_transition"]
+    else:
+        simulated_gui = "ready"
+        gui_ready_score = 0.9
+        ui_blockers = ["login_expired"] if retry_count > 1 else []
+
+    gui_ready_score = max(0.2, min(gui_ready_score, 1.0))
+    perception_latency = 0.2 if gui_ready_score >= 0.8 else 0.8
+
+    note = (
+        f"Perceived GUI state: {simulated_gui} "
+        f"(ready_score={gui_ready_score:.2f}, blockers={ui_blockers})"
+    )
+    return {
+        "gui_state": simulated_gui,
+        "gui_ready_score": gui_ready_score,
+        "ui_blockers": ui_blockers,
+        "perception_latency": perception_latency,
+        "history": state["history"] + [note],
+    }
 
 
 @os.instruction(Instr.GENERATE)
 def reason(state: GUIState) -> GUIState:
-    """Reasoner Module
-
-    Produces an action command based on the current subtask and perceived GUI
-    state. In this demo, the action is deterministic and formatted as a
-    single-line instruction.
-    """
+    """Reasoner module that tracks consistency with planner and GUI state."""
     subtask = (state.get("current_subtask") or "").strip()
     gui = state.get("gui_state") or "unknown"
     if not subtask:
         action = "noop"
     else:
         action = f"perform '{subtask}' on GUI (state={gui})"
-    note = f"Reasoned action: {action}"
-    return {"action": action, "history": state["history"] + [note]}
+    consistency = 0.9 if (subtask and gui == "ready") else 0.6 if subtask else 0.3
+    if state.get("ui_blockers"):
+        consistency -= 0.2
+    consistency = max(0.0, consistency)
+
+    note = f"Reasoned action: {action} (consistency={consistency:.2f})"
+    return {
+        "action": action,
+        "reason_consistency": consistency,
+        "history": state["history"] + [note],
+    }
 
 
 @os.instruction(Instr.EVALUATE_PROGRESS)
 def decide_finish(state: GUIState) -> GUIState:
-    """Finish Subtask? (Decision)
-
-    Heuristic:
-    - If action contains the subtask phrase and GUI is 'ready', confidence is high
-    - Otherwise confidence is lower and agent will iterate
-    """
+    """Finish subtask decision node with governance-friendly signals."""
     subtask = (state.get("current_subtask") or "").strip()
     action = state.get("action") or ""
-    gui = state.get("gui_state") or ""
+    gui_ready_score = state.get("gui_ready_score", 1.0)
+    reason_consistency = state.get("reason_consistency", 1.0)
 
     is_format_ok = bool(subtask) and subtask in action and action.startswith("perform")
-    is_gui_ready = gui == "ready"
-
-    confidence = 0.9 if (is_format_ok and is_gui_ready) else 0.4
-    note = (
-        f"Decision: format_ok={is_format_ok}, gui_ready={is_gui_ready}, "
-        f"confidence={confidence:.2f}"
+    confidence = max(
+        0.1,
+        min(
+            0.95,
+            0.4 * is_format_ok + 0.3 * reason_consistency + 0.3 * gui_ready_score,
+        ),
     )
-    return {"confidence": confidence, "history": state["history"] + [note]}
+
+    needs_replan = reason_consistency < 0.5 or gui_ready_score < 0.5
+    note = (
+        f"Decision: format_ok={is_format_ok}, gui_ready={gui_ready_score:.2f}, "
+        f"consistency={reason_consistency:.2f}, confidence={confidence:.2f}, "
+        f"needs_replan={needs_replan}"
+    )
+    return {
+        "confidence": confidence,
+        "needs_replan": needs_replan,
+        "history": state["history"] + [note],
+    }
 
 
 @os.instruction(Instr.TOOL_CALL)
 def execute(state: GUIState) -> GUIState:
-    """Execution Module
-
-    Executes the action. This is a no-op tool call for the demo.
-    """
+    """Execution module that validates GUI readiness before acting."""
     action = state.get("action") or "noop"
-    note = f"Executed action: {action}"
+    gui_ready_score = state.get("gui_ready_score", 1.0)
+    history = state["history"]
 
-    # Mark current_subtask as completed on successful execution to progress.
-    completed = state["current_subtask"]
-    remaining = [s for s in state["subtasks"] if s != completed]
+    execution_alignment = 0.95 if gui_ready_score >= 0.75 else 0.5
+    succeeded = execution_alignment >= 0.8
+
+    if succeeded:
+        completed = state.get("current_subtask", "")
+        remaining = [s for s in state["subtasks"] if s != completed]
+        note = f"Executed action: {action}"
+        return {
+            "executed": True,
+            "subtasks": remaining,
+            "current_subtask": "",
+            "retry_count": 0,
+            "execution_alignment": execution_alignment,
+            "needs_replan": False,
+            "history": history + [note],
+        }
+
+    # Execution deferred due to unstable GUI.
+    note = (
+        "Execution delayed: GUI unstable "
+        f"(alignment={execution_alignment:.2f}). Retrying after perception."
+    )
     return {
-        "executed": True,
-        "subtasks": remaining,
-        "current_subtask": "",
+        "executed": False,
+        "retry_count": state.get("retry_count", 0) + 1,
+        "execution_alignment": execution_alignment,
+        "history": history + [note],
+    }
+
+
+@os.instruction(Instr.FALLBACK)
+def resolve_blockers(state: GUIState) -> GUIState:
+    """Resolve blockers such as popups or login expiration."""
+    blockers = state.get("ui_blockers", [])
+    if not blockers:
+        note = "No blockers detected during resolution step."
+        return {"history": state["history"] + [note]}
+
+    needs_replan = any("login" in blocker for blocker in blockers)
+    note = f"Resolved blockers: {blockers} (needs_replan={needs_replan})"
+    return {
+        "ui_blockers": [],
+        "needs_replan": needs_replan,
         "history": state["history"] + [note],
     }
 
 
 @os.instruction(Instr.GENERATE)
 def report(state: GUIState) -> GUIState:
-    """Report to User
-
-    Summarizes what happened across the run for the demonstration.
-    """
-    summary = f"Completed subtasks. Final history length: {len(state['history'])}"
+    """Report node summarizing governance signals."""
+    summary = (
+        f"Completed subtasks. Final history length: {len(state['history'])}. "
+        f"Plan confidence={state.get('plan_confidence', 0.0):.2f}"
+    )
     return {"history": state["history"] + [summary]}
 
 
@@ -199,6 +301,7 @@ builder = StateGraph(GUIState)
 builder.add_node(plan)
 builder.add_node(orchestrate)
 builder.add_node(perceive)
+builder.add_node(resolve_blockers)
 builder.add_node(reason)
 builder.add_node(decide_finish)
 builder.add_node(execute)
@@ -211,18 +314,37 @@ builder.add_edge("plan", "orchestrate")
 # If done at orchestrator, go to report then END
 # Otherwise inner loop: Perception → Reason → Decision
 def route_after_orchestrate(state: GUIState) -> str:
-    return "report" if state.get("done") else "perceive"
+    if state.get("done"):
+        return "report"
+    if state.get("needs_replan"):
+        return "plan"
+    return "perceive"
 
 
 builder.add_conditional_edges("orchestrate", route_after_orchestrate, path_map=None)
-builder.add_edge("perceive", "reason")
+
+
+def route_after_perceive(state: GUIState) -> str:
+    if state.get("ui_blockers"):
+        return "resolve_blockers"
+    return "reason"
+
+
+builder.add_conditional_edges("perceive", route_after_perceive, path_map=None)
+builder.add_edge("resolve_blockers", "reason")
 builder.add_edge("reason", "decide_finish")
 
 # Decision:
 # - If confidence high, execute then go back to orchestrate for next subtask
 # - If low, iterate via perception to refine
 def route_after_decide(state: GUIState) -> str:
-    return "execute" if (state.get("confidence", 0.0) >= 0.7) else "perceive"
+    if state.get("needs_replan"):
+        return "plan"
+    if state.get("confidence", 0.0) >= 0.7:
+        return "execute"
+    if state.get("retry_count", 0) >= state.get("max_retries", 3):
+        return "plan"
+    return "perceive"
 
 
 builder.add_conditional_edges("decide_finish", route_after_decide, path_map=None)
@@ -256,6 +378,15 @@ if __name__ == "__main__":
         "confidence": 0.0,
         "done": False,
         "history": [],
+        "plan_confidence": 0.0,
+        "needs_replan": False,
+        "gui_ready_score": 1.0,
+        "ui_blockers": [],
+        "perception_latency": 0.0,
+        "reason_consistency": 1.0,
+        "execution_alignment": 1.0,
+        "retry_count": 0,
+        "max_retries": 3,
     }
 
     for chunk in graph.stream(initial_state, stream_mode="values", debug=False):

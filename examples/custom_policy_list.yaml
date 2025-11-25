@@ -24,3 +24,28 @@ policy_routers:
     threshold: 0.6
     target: generate
 
+  # GUI-specific guardrails derived from recent failure analysis
+  - type: MetricThresholdPolicyRouter
+    name: enforce_replan_on_low_plan_confidence
+    key: plan_confidence
+    threshold: 0.65
+    target: plan
+
+  - type: MetricThresholdPolicyRouter
+    name: wait_for_gui_ready
+    key: gui_ready_score
+    threshold: 0.75
+    target: perceive
+
+  - type: MetricThresholdPolicyRouter
+    name: re_reason_on_context_drift
+    key: reason_consistency
+    threshold: 0.7
+    target: reason
+
+  - type: MetricThresholdPolicyRouter
+    name: reobserve_when_execution_alignment_low
+    key: execution_alignment
+    threshold: 0.8
+    target: perceive
+

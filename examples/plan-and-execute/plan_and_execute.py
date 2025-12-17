@@ -5,6 +5,25 @@ Plan-and-Solve paper and Baby-AGI project. The core idea is to first come up
 with a multi-step plan, and then go through that plan one item at a time.
 After accomplishing a particular task, the agent can revisit the plan and
 modify as appropriate.
+
+WORKFLOW CONSISTENCY:
+This implementation maintains the same workflow logic as the original notebook
+(plan-and-execute.ipynb). Node functions are kept simple and do not calculate
+quality metrics or perform policy-related computations.
+
+POLICY DESIGN:
+Policies are designed to monitor and govern the workflow WITHOUT modifying
+the original node functions. There are two types of policies:
+
+1. Alert-only checkers: Monitor execution and log warnings/alerts when issues
+   are detected, but never block execution or modify node behavior.
+
+2. Routing policies: Can trigger flow redirection (e.g., route back to planner
+   when quality is low) but do not modify the original node code or logic.
+
+All policies calculate metrics independently from state, without requiring
+node functions to compute them. This ensures complete separation between
+workflow logic and governance policies.
 """
 
 from __future__ import annotations
@@ -92,13 +111,17 @@ def _latest_str(existing: str | None, update: str | None) -> str:
 
 
 class PlanExecute(TypedDict, total=False):
-    """State for plan-and-execute agent."""
+    """State for plan-and-execute agent.
+    
+    This matches the original notebook workflow. Quality metrics are optional
+    and only used by policies for monitoring/alerting, not by node functions.
+    """
 
     input: str
     plan: Annotated[List[str], _latest_list]
     past_steps: Annotated[List[Tuple[str, str]], operator.add]
     response: Annotated[str, _latest_str]
-    # Quality metrics for policy enforcement
+    # Optional quality metrics for policy monitoring (not used by node functions)
     plan_quality_score: Annotated[float, _latest_float]  # Quality of the current plan (0.0-1.0)
     execution_success_score: Annotated[float, _latest_float]  # Success rate of executed steps (0.0-1.0)
     step_count: Annotated[int, _latest_int]  # Number of steps executed
@@ -174,49 +197,32 @@ replanner = replanner_prompt | ChatOpenAI(
 
 @os_instance.instruction(Instr.GENERATE)
 def plan_step(state: PlanExecute) -> PlanExecute:
-    """Create an initial plan based on the user's input."""
+    """Create an initial plan based on the user's input.
+    
+    This matches the original notebook workflow - simple plan generation
+    without quality calculations. Policies will monitor the plan separately.
+    """
     plan_result = planner.invoke({"messages": [("user", state["input"])]})
     steps = plan_result.steps
     
-    # Calculate plan quality score
-    # Factors: number of steps (optimal 3-7), step clarity, completeness
-    step_count = len(steps)
-    if step_count == 0:
-        plan_quality = 0.0
-    elif step_count > 10:
-        # Too many steps suggests poor decomposition
-        plan_quality = 0.3
-    elif step_count < 2:
-        # Too few steps suggests incomplete planning
-        plan_quality = 0.5
-    else:
-        # Optimal range: 3-7 steps
-        plan_quality = min(1.0, 0.7 + 0.1 * (7 - abs(step_count - 5)))
-    
-    # Check step clarity (simple heuristic: longer steps might be clearer)
-    avg_step_length = sum(len(step) for step in steps) / max(len(steps), 1)
-    clarity_bonus = min(0.2, avg_step_length / 100.0)
-    plan_quality = min(1.0, plan_quality + clarity_bonus)
-    
+    # Simple return matching notebook workflow
+    # Quality metrics are calculated by policies, not here
     return {
         "plan": steps,
-        "plan_quality_score": plan_quality,
-        "step_count": 0,  # Reset step count for new plan
-        "error_count": 0,  # Reset error count
-        "execution_failed": False,
     }
 
 
 @os_instance.instruction(Instr.TOOL_CALL)
 def execute_step(state: PlanExecute) -> PlanExecute:
-    """Execute the first step in the current plan."""
+    """Execute the first step in the current plan.
+    
+    This matches the original notebook workflow - simple execution without
+    quality calculations. Policies will monitor execution separately.
+    """
     plan = state["plan"]
     if not plan:
-        error_count = state.get("error_count", 0) + 1
         return {
             "past_steps": [("", "No plan available")],
-            "error_count": error_count,
-            "execution_failed": True,
         }
 
     plan_str = "\n".join(f"{i + 1}. {step}" for i, step in enumerate(plan))
@@ -224,60 +230,24 @@ def execute_step(state: PlanExecute) -> PlanExecute:
     task_formatted = f"""For the following plan:
 {plan_str}\n\nYou are tasked with executing step 1, {task}."""
     
-    try:
-        agent_response = agent_executor.invoke(
-            {"messages": [("user", task_formatted)]}
-        )
-        result_content = agent_response["messages"][-1].content
-        
-        # Check if execution was successful
-        # Simple heuristic: check for error indicators
-        error_indicators = [
-            "unable to",
-            "error",
-            "failed",
-            "cannot",
-            "connection issue",
-            "not available",
-        ]
-        execution_failed = any(
-            indicator.lower() in result_content.lower() for indicator in error_indicators
-        )
-        
-        step_count = state.get("step_count", 0) + 1
-        error_count = state.get("error_count", 0)
-        if execution_failed:
-            error_count += 1
-        
-        # Calculate execution success score
-        total_steps = len(state.get("past_steps", [])) + 1
-        success_steps = total_steps - error_count
-        execution_success_score = success_steps / max(total_steps, 1)
-        
-        return {
-            "past_steps": [(task, result_content)],
-            "step_count": step_count,
-            "error_count": error_count,
-            "execution_failed": execution_failed,
-            "execution_success_score": execution_success_score,
-        }
-    except Exception as e:
-        # Handle execution exceptions
-        error_count = state.get("error_count", 0) + 1
-        step_count = state.get("step_count", 0) + 1
-        logger.error(f"Execution error: {e}")
-        return {
-            "past_steps": [(task, f"Execution error: {str(e)}")],
-            "step_count": step_count,
-            "error_count": error_count,
-            "execution_failed": True,
-            "execution_success_score": max(0.0, 1.0 - (error_count / max(step_count, 1))),
-        }
+    # Simple execution matching notebook workflow
+    agent_response = agent_executor.invoke(
+        {"messages": [("user", task_formatted)]}
+    )
+    result_content = agent_response["messages"][-1].content
+    
+    return {
+        "past_steps": [(task, result_content)],
+    }
 
 
 @os_instance.instruction(Instr.GENERATE)
 def replan_step(state: PlanExecute) -> PlanExecute:
-    """Re-plan based on the results of executed steps."""
+    """Re-plan based on the results of executed steps.
+    
+    This matches the original notebook workflow - simple replanning without
+    quality calculations. Policies will monitor replanning separately.
+    """
     # Format past steps for the replanner
     past_steps_str = "\n".join(
         f"- {step}: {result}" for step, result in state.get("past_steps", [])
@@ -290,57 +260,15 @@ def replan_step(state: PlanExecute) -> PlanExecute:
         "past_steps": past_steps_str,
     }
 
-    try:
-        output = replanner.invoke(replanner_input)
-        if isinstance(output.action, Response):
-            response = output.action.response
-            # Calculate response quality score
-            # Simple heuristic: longer responses with key information are better
-            response_length = len(response)
-            has_answer_indicators = any(
-                word in response.lower()
-                for word in ["is", "are", "was", "were", "the", "answer", "result"]
-            )
-            response_quality = min(1.0, 0.5 + 0.3 * (response_length > 50) + 0.2 * has_answer_indicators)
-            
-            return {
-                "response": response,
-                "response_quality_score": response_quality,
-            }
-        else:
-            # New plan generated
-            new_steps = output.action.steps
-            # Calculate plan quality for new plan
-            step_count = len(new_steps)
-            if step_count == 0:
-                plan_quality = 0.0
-            elif step_count > 10:
-                plan_quality = 0.3
-            elif step_count < 2:
-                plan_quality = 0.5
-            else:
-                plan_quality = min(1.0, 0.7 + 0.1 * (7 - abs(step_count - 5)))
-            
-            return {
-                "plan": new_steps,
-                "plan_quality_score": plan_quality,
-            }
-    except Exception as e:
-        logger.error(f"Replanning error: {e}")
-        # On error, try to continue with existing plan or generate error response
-        error_count = state.get("error_count", 0) + 1
-        if error_count > 3:
-            # Too many errors, generate error response
-            return {
-                "response": f"Unable to complete task due to multiple errors. Last error: {str(e)}",
-                "response_quality_score": 0.2,
-                "error_count": error_count,
-            }
-        # Return existing plan with lower quality score
+    # Simple replanning matching notebook workflow
+    output = replanner.invoke(replanner_input)
+    if isinstance(output.action, Response):
         return {
-            "plan": state.get("plan", []),
-            "plan_quality_score": 0.3,
-            "error_count": error_count,
+            "response": output.action.response,
+        }
+    else:
+        return {
+            "plan": output.action.steps,
         }
 
 
@@ -402,20 +330,17 @@ class PlanExecuteAgent:
         Returns:
             Final state dictionary containing the response or execution results.
         """
+        # Simple initial state matching notebook workflow
+        # Quality metrics are optional and only used by policies
         initial_state: PlanExecute = {
             "input": user_input,
             "plan": [],
             "past_steps": [],
             "response": "",
-            "plan_quality_score": 0.0,
-            "execution_success_score": 1.0,
-            "step_count": 0,
-            "max_steps": 10,  # Maximum steps before forcing replan
-            "response_quality_score": 0.0,
-            "error_count": 0,
-            "execution_failed": False,
         }
-        result = graph.invoke(initial_state)
+        # Set recursion limit to prevent infinite loops
+        config = {"recursion_limit": 50}
+        result = graph.invoke(initial_state, config=config)
         return result
 
 
@@ -423,22 +348,19 @@ if __name__ == "__main__":
     os_instance.history.clear()
     logger.info("Running plan-and-execute agent with streaming updates.")
 
+    # Simple initial state matching notebook workflow
     initial_state: PlanExecute = {
         "input": "what is the hometown of the mens 2024 Australia open winner?",
         "plan": [],
         "past_steps": [],
         "response": "",
-        "plan_quality_score": 0.0,
-        "execution_success_score": 1.0,
-        "step_count": 0,
-        "max_steps": 10,
-        "response_quality_score": 0.0,
-        "error_count": 0,
-        "execution_failed": False,
     }
 
+    # Set recursion limit to prevent infinite loops (matching notebook)
+    config = {"recursion_limit": 50}
+    
     final_state: PlanExecute | None = None
-    for chunk in graph.stream(initial_state, stream_mode="values", debug=False):
+    for chunk in graph.stream(initial_state, stream_mode="values", debug=False, config=config):
         logger.info("State update: %s", chunk)
         final_state = chunk
 

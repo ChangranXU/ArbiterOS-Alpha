@@ -4,11 +4,9 @@ This module allows developers to define custom policies programmatically for
 the plan-and-execute agent. Policies defined here cannot override kernel
 policies - conflicts will be detected and reported as errors.
 
-Policies include:
-- Plan quality validation
-- Step count limits
-- Error handling and recovery
-- Execution success monitoring
+Policies include two types:
+1. Alert-only checkers: Only log warnings/alerts, do not block execution
+2. Routing policies: Can trigger flow redirection but don't modify node code
 """
 
 from __future__ import annotations
@@ -32,33 +30,69 @@ logger = logging.getLogger(__name__)
 PolicyType = Union[PolicyChecker, PolicyRouter, GraphStructurePolicyChecker]
 
 
-class PlanQualityPolicyChecker(PolicyChecker):
-    """Policy checker that validates plan quality before execution.
+class AlertOnlyPolicyChecker(PolicyChecker):
+    """Base class for alert-only policy checkers that only log warnings.
     
-    Prevents execution if plan quality is too low, forcing replanning.
+    These checkers monitor execution and alert on issues but do not block
+    execution or modify node behavior. They are purely observational.
     """
 
-    def __init__(self, name: str = "check_plan_quality", threshold: float = 0.4):
-        """Initialize plan quality checker.
+    def __init__(self, name: str, alert_level: str = "warning"):
+        """Initialize alert-only checker.
         
         Args:
             name: Name of the policy checker.
-            threshold: Minimum plan quality score required (0.0-1.0).
+            alert_level: Logging level for alerts ("warning" or "info").
         """
         self.name = name
+        self.alert_level = alert_level
+
+    def _alert(self, message: str) -> None:
+        """Log an alert message without blocking execution.
+        
+        Args:
+            message: Alert message to log.
+        """
+        if self.alert_level == "warning":
+            logger.warning(f"[POLICY ALERT] {self.name}: {message}")
+        else:
+            logger.info(f"[POLICY ALERT] {self.name}: {message}")
+
+
+class PlanQualityAlertChecker(AlertOnlyPolicyChecker):
+    """Alert-only checker that monitors plan quality and alerts on low quality.
+    
+    This checker only logs warnings when plan quality is low, but does not
+    block execution. The original workflow continues unchanged.
+    """
+
+    def __init__(
+        self, 
+        name: str = "alert_plan_quality", 
+        threshold: float = 0.4,
+        alert_level: str = "warning"
+    ):
+        """Initialize plan quality alert checker.
+        
+        Args:
+            name: Name of the policy checker.
+            threshold: Threshold below which to alert (0.0-1.0).
+            alert_level: Logging level for alerts.
+        """
+        super().__init__(name, alert_level)
         self.threshold = threshold
 
     def check_before(self, history: list) -> bool:
-        """Check if plan quality meets threshold before execution.
+        """Check plan quality and alert if below threshold.
+        
+        This checker calculates plan quality independently from state,
+        without requiring node functions to compute it.
         
         Args:
             history: Execution history up to this point.
             
         Returns:
-            True if plan quality is acceptable, False otherwise.
-            
-        Raises:
-            RuntimeError: If plan quality is below threshold.
+            Always returns True (never blocks execution).
         """
         if not history:
             return True
@@ -67,45 +101,70 @@ class PlanQualityPolicyChecker(PolicyChecker):
         last_entry = history[-1]
         output_state = last_entry.output_state
         
-        plan_quality = output_state.get("plan_quality_score", 1.0)
+        # Calculate plan quality from state (independent of node functions)
+        plan = output_state.get("plan", [])
+        if not plan:
+            plan_quality = 0.0
+        else:
+            step_count = len(plan)
+            # Simple quality heuristic: optimal range is 3-7 steps
+            if step_count == 0:
+                plan_quality = 0.0
+            elif step_count > 10:
+                plan_quality = 0.3
+            elif step_count < 2:
+                plan_quality = 0.5
+            else:
+                plan_quality = min(1.0, 0.7 + 0.1 * (7 - abs(step_count - 5)))
+            
+            # Check step clarity (simple heuristic)
+            avg_step_length = sum(len(step) for step in plan) / max(len(plan), 1)
+            clarity_bonus = min(0.2, avg_step_length / 100.0)
+            plan_quality = min(1.0, plan_quality + clarity_bonus)
         
         if plan_quality < self.threshold:
-            logger_msg = (
-                f"Plan quality {plan_quality:.2f} below threshold {self.threshold}. "
-                "Replanning required."
+            self._alert(
+                f"Plan quality {plan_quality:.2f} is below threshold {self.threshold}. "
+                "Consider replanning for better results."
             )
-            raise RuntimeError(logger_msg)
         
         return True
 
 
-class StepCountPolicyChecker(PolicyChecker):
-    """Policy checker that limits the number of execution steps.
+class StepCountAlertChecker(AlertOnlyPolicyChecker):
+    """Alert-only checker that monitors step count and alerts on high counts.
     
-    Prevents infinite loops by limiting total steps before forcing replanning.
+    This checker only logs warnings when step count is high, but does not
+    block execution. The original workflow continues unchanged.
     """
 
-    def __init__(self, name: str = "check_step_count", max_steps: int = 15):
-        """Initialize step count checker.
+    def __init__(
+        self, 
+        name: str = "alert_step_count", 
+        max_steps: int = 15,
+        alert_level: str = "warning"
+    ):
+        """Initialize step count alert checker.
         
         Args:
             name: Name of the policy checker.
-            max_steps: Maximum allowed steps before replanning.
+            max_steps: Threshold above which to alert.
+            alert_level: Logging level for alerts.
         """
-        self.name = name
+        super().__init__(name, alert_level)
         self.max_steps = max_steps
 
     def check_before(self, history: list) -> bool:
-        """Check if step count is within limits.
+        """Check step count and alert if above threshold.
+        
+        This checker calculates step count independently from state,
+        without requiring node functions to compute it.
         
         Args:
             history: Execution history up to this point.
             
         Returns:
-            True if step count is acceptable, False otherwise.
-            
-        Raises:
-            RuntimeError: If step count exceeds maximum.
+            Always returns True (never blocks execution).
         """
         if not history:
             return True
@@ -114,46 +173,54 @@ class StepCountPolicyChecker(PolicyChecker):
         last_entry = history[-1]
         output_state = last_entry.output_state
         
-        step_count = output_state.get("step_count", 0)
+        # Calculate step count from past_steps (independent of node functions)
+        past_steps = output_state.get("past_steps", [])
+        step_count = len(past_steps)
         max_allowed = output_state.get("max_steps", self.max_steps)
         
         if step_count >= max_allowed:
-            logger_msg = (
-                f"Step count {step_count} exceeds maximum {max_allowed}. "
-                "Replanning required to prevent infinite loop."
+            self._alert(
+                f"Step count {step_count} has reached or exceeded threshold {max_allowed}. "
+                "Consider replanning to prevent potential infinite loops."
             )
-            raise RuntimeError(logger_msg)
         
         return True
 
 
-class ErrorCountPolicyChecker(PolicyChecker):
-    """Policy checker that limits consecutive errors.
+class ErrorCountAlertChecker(AlertOnlyPolicyChecker):
+    """Alert-only checker that monitors error count and alerts on high counts.
     
-    Prevents continued execution after too many errors, forcing replanning.
+    This checker only logs warnings when error count is high, but does not
+    block execution. The original workflow continues unchanged.
     """
 
-    def __init__(self, name: str = "check_error_count", max_errors: int = 3):
-        """Initialize error count checker.
+    def __init__(
+        self, 
+        name: str = "alert_error_count", 
+        max_errors: int = 3,
+        alert_level: str = "warning"
+    ):
+        """Initialize error count alert checker.
         
         Args:
             name: Name of the policy checker.
-            max_errors: Maximum allowed consecutive errors.
+            max_errors: Threshold above which to alert.
+            alert_level: Logging level for alerts.
         """
-        self.name = name
+        super().__init__(name, alert_level)
         self.max_errors = max_errors
 
     def check_before(self, history: list) -> bool:
-        """Check if error count is within limits.
+        """Check error count and alert if above threshold.
+        
+        This checker calculates error count independently from state,
+        without requiring node functions to compute it.
         
         Args:
             history: Execution history up to this point.
             
         Returns:
-            True if error count is acceptable, False otherwise.
-            
-        Raises:
-            RuntimeError: If error count exceeds maximum.
+            Always returns True (never blocks execution).
         """
         if not history:
             return True
@@ -162,78 +229,323 @@ class ErrorCountPolicyChecker(PolicyChecker):
         last_entry = history[-1]
         output_state = last_entry.output_state
         
-        error_count = output_state.get("error_count", 0)
+        # Calculate error count from past_steps (independent of node functions)
+        # Simple heuristic: check for error indicators in past step results
+        past_steps = output_state.get("past_steps", [])
+        error_indicators = [
+            "error",
+            "failed",
+            "unable to",
+            "cannot",
+            "connection issue",
+            "not available",
+        ]
+        error_count = sum(
+            1 for _, result in past_steps
+            if any(indicator.lower() in str(result).lower() for indicator in error_indicators)
+        )
         
         if error_count >= self.max_errors:
-            logger_msg = (
-                f"Error count {error_count} exceeds maximum {self.max_errors}. "
-                "Replanning required to recover from errors."
+            self._alert(
+                f"Error count {error_count} has reached or exceeded threshold {self.max_errors}. "
+                "Consider replanning to recover from errors."
             )
-            raise RuntimeError(logger_msg)
         
         return True
+
+
+class PlanQualityPolicyRouter(PolicyRouter):
+    """Policy router that routes based on calculated plan quality.
+    
+    This router calculates plan quality independently and can trigger
+    routing without requiring node functions to compute it.
+    """
+
+    def __init__(
+        self,
+        name: str = "replan_on_low_plan_quality",
+        threshold: float = 0.5,
+        target: str = "planner"
+    ):
+        """Initialize plan quality router.
+        
+        Args:
+            name: Name of the router.
+            threshold: Minimum plan quality required (0.0-1.0).
+            target: Target node to route to when quality is below threshold.
+        """
+        self.name = name
+        self.threshold = threshold
+        self.target = target
+
+    def route_after(self, history: list) -> str | None:
+        """Route to target node if plan quality is below threshold.
+        
+        Calculates plan quality independently from state.
+        Prevents infinite loops by checking if we just came from the target node.
+        
+        Args:
+            history: Execution history including the just-executed instruction.
+            
+        Returns:
+            Target node name if quality < threshold, None otherwise.
+        """
+        if not history or len(history) < 2:
+            return None
+        
+        last_entry = history[-1]
+        output_state = last_entry.output_state
+        
+        # Prevent infinite loops: don't route if we just came from the target
+        # Check if the previous node was the target (to avoid planner -> replan -> planner loops)
+        prev_entry = history[-2]
+        prev_node = prev_entry.node_name
+        if prev_node == self.target:
+            # Just came from target, don't route back immediately
+            return None
+        
+        # Calculate plan quality independently
+        plan = output_state.get("plan", [])
+        if not plan:
+            plan_quality = 0.0
+        else:
+            step_count = len(plan)
+            if step_count == 0:
+                plan_quality = 0.0
+            elif step_count > 10:
+                plan_quality = 0.3
+            elif step_count < 2:
+                plan_quality = 0.5
+            else:
+                plan_quality = min(1.0, 0.7 + 0.1 * (7 - abs(step_count - 5)))
+            
+            avg_step_length = sum(len(step) for step in plan) / max(len(plan), 1)
+            clarity_bonus = min(0.2, avg_step_length / 100.0)
+            plan_quality = min(1.0, plan_quality + clarity_bonus)
+        
+        if plan_quality < self.threshold:
+            logger.info(
+                f"[POLICY ROUTER] {self.name}: Plan quality {plan_quality:.2f} below "
+                f"threshold {self.threshold}, routing to {self.target}"
+            )
+            return self.target
+        
+        return None
+
+
+class StepCountPolicyRouter(PolicyRouter):
+    """Policy router that routes based on calculated step count.
+    
+    This router calculates step count independently and can trigger
+    routing without requiring node functions to compute it.
+    """
+
+    def __init__(
+        self,
+        name: str = "replan_on_high_step_count",
+        threshold: float = 10.0,
+        target: str = "planner"
+    ):
+        """Initialize step count router.
+        
+        Args:
+            name: Name of the router.
+            threshold: Maximum step count before routing.
+            target: Target node to route to when step count exceeds threshold.
+        """
+        self.name = name
+        self.threshold = threshold
+        self.target = target
+
+    def route_after(self, history: list) -> str | None:
+        """Route to target node if step count exceeds threshold.
+        
+        Calculates step count independently from state.
+        Prevents infinite loops by checking if we just came from the target node.
+        
+        Args:
+            history: Execution history including the just-executed instruction.
+            
+        Returns:
+            Target node name if step_count >= threshold, None otherwise.
+        """
+        if not history or len(history) < 2:
+            return None
+        
+        # Prevent infinite loops: don't route if we just came from the target
+        prev_entry = history[-2]
+        prev_node = prev_entry.node_name
+        if prev_node == self.target:
+            # Just came from target, don't route back immediately
+            return None
+        
+        last_entry = history[-1]
+        output_state = last_entry.output_state
+        
+        # Calculate step count independently
+        past_steps = output_state.get("past_steps", [])
+        step_count = len(past_steps)
+        
+        if step_count >= self.threshold:
+            logger.info(
+                f"[POLICY ROUTER] {self.name}: Step count {step_count} exceeds "
+                f"threshold {self.threshold}, routing to {self.target}"
+            )
+            return self.target
+        
+        return None
+
+
+class ExecutionSuccessPolicyRouter(PolicyRouter):
+    """Policy router that routes based on calculated execution success rate.
+    
+    This router calculates execution success rate independently and can trigger
+    routing without requiring node functions to compute it.
+    """
+
+    def __init__(
+        self,
+        name: str = "replan_on_low_execution_success",
+        threshold: float = 0.5,
+        target: str = "planner"
+    ):
+        """Initialize execution success router.
+        
+        Args:
+            name: Name of the router.
+            threshold: Minimum execution success rate required (0.0-1.0).
+            target: Target node to route to when success rate is below threshold.
+        """
+        self.name = name
+        self.threshold = threshold
+        self.target = target
+
+    def route_after(self, history: list) -> str | None:
+        """Route to target node if execution success rate is below threshold.
+        
+        Calculates execution success rate independently from state.
+        Prevents infinite loops by checking if we just came from the target node.
+        
+        Args:
+            history: Execution history including the just-executed instruction.
+            
+        Returns:
+            Target node name if success_rate < threshold, None otherwise.
+        """
+        if not history or len(history) < 2:
+            return None
+        
+        # Prevent infinite loops: don't route if we just came from the target
+        prev_entry = history[-2]
+        prev_node = prev_entry.node_name
+        if prev_node == self.target:
+            # Just came from target, don't route back immediately
+            return None
+        
+        last_entry = history[-1]
+        output_state = last_entry.output_state
+        
+        # Calculate execution success rate independently
+        past_steps = output_state.get("past_steps", [])
+        if not past_steps:
+            return None
+        
+        error_indicators = [
+            "error",
+            "failed",
+            "unable to",
+            "cannot",
+            "connection issue",
+            "not available",
+        ]
+        error_count = sum(
+            1 for _, result in past_steps
+            if any(indicator.lower() in str(result).lower() for indicator in error_indicators)
+        )
+        
+        total_steps = len(past_steps)
+        success_steps = total_steps - error_count
+        execution_success_score = success_steps / max(total_steps, 1)
+        
+        if execution_success_score < self.threshold:
+            logger.info(
+                f"[POLICY ROUTER] {self.name}: Execution success rate {execution_success_score:.2f} "
+                f"below threshold {self.threshold}, routing to {self.target}"
+            )
+            return self.target
+        
+        return None
 
 
 def get_policies() -> Dict[str, List[PolicyType]]:
     """Return custom policy instances for the plan-and-execute agent.
 
+    Policies are divided into two categories:
+    1. Alert-only checkers: Monitor and alert on issues without blocking execution
+    2. Routing policies: Can redirect flow but don't modify node code (DISABLED by default)
+    
+    NOTE: Routing policies are disabled by default because they can interfere with
+    the original workflow logic. The workflow should match the notebook behavior,
+    with policies only monitoring and alerting, not changing the execution flow.
+    To enable routing policies, uncomment them in the policy_routers list below.
+
     Returns:
         Dictionary with keys:
-        - policy_checkers: List of PolicyChecker instances
-        - policy_routers: List of PolicyRouter instances
+        - policy_checkers: List of PolicyChecker instances (alert-only)
+        - policy_routers: List of PolicyRouter instances (currently empty to preserve workflow)
         - graph_structure_checkers: List of GraphStructurePolicyChecker instances
     """
     return {
         "policy_checkers": [
-            PlanQualityPolicyChecker(
-                name="check_plan_quality_before_execution",
+            # Alert-only checkers: Only log warnings, never block execution
+            PlanQualityAlertChecker(
+                name="alert_plan_quality",
                 threshold=0.4,
+                alert_level="warning",
             ),
-            StepCountPolicyChecker(
-                name="check_step_count_limit",
+            StepCountAlertChecker(
+                name="alert_step_count",
                 max_steps=15,
+                alert_level="warning",
             ),
-            ErrorCountPolicyChecker(
-                name="check_error_count_limit",
+            ErrorCountAlertChecker(
+                name="alert_error_count",
                 max_errors=3,
+                alert_level="warning",
             ),
         ],
         "policy_routers": [
-            # Route back to planner if plan quality is too low
-            MetricThresholdPolicyRouter(
-                name="replan_on_low_plan_quality",
-                key="plan_quality_score",
-                threshold=0.5,
-                target="planner",
-            ),
-            # Route back to planner if execution success rate is too low
-            MetricThresholdPolicyRouter(
-                name="replan_on_low_execution_success",
-                key="execution_success_score",
-                threshold=0.5,
-                target="planner",
-            ),
-            # Route back to planner if too many steps executed
-            # This is handled by StepCountPolicyChecker, but router provides alternative
-            MetricThresholdPolicyRouter(
-                name="replan_on_high_step_count",
-                key="step_count",
-                threshold=10.0,  # Note: threshold is compared as float
-                target="planner",
-            ),
+            # Routing policies: DISABLED by default to maintain original workflow
+            # These routers can redirect flow but may interfere with normal execution.
+            # Uncomment to enable routing-based governance (use with caution).
+            # 
+            # PlanQualityPolicyRouter(
+            #     name="replan_on_low_plan_quality",
+            #     threshold=0.5,
+            #     target="planner",
+            # ),
+            # ExecutionSuccessPolicyRouter(
+            #     name="replan_on_low_execution_success",
+            #     threshold=0.5,
+            #     target="planner",
+            # ),
+            # StepCountPolicyRouter(
+            #     name="replan_on_high_step_count",
+            #     threshold=10.0,
+            #     target="planner",
+            # ),
         ],
         "graph_structure_checkers": [
-            # Prevent direct execution without planning
+            # Graph structure checkers: Validate workflow structure (alert-only)
             GraphStructurePolicyChecker().add_blacklist(
                 name="no_execution_without_plan",
                 sequence=["agent", "agent"],  # Cannot execute twice without replanning
-                level="warning",
+                level="warning",  # Warning level: only alerts, doesn't block
             ),
-            # Prevent infinite replanning loops
             GraphStructurePolicyChecker().add_blacklist(
                 name="no_infinite_replan_loop",
                 sequence=["replan", "replan"],
-                level="warning",
+                level="warning",  # Warning level: only alerts, doesn't block
             ),
         ],
     }

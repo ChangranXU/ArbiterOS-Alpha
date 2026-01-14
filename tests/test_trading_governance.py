@@ -7,16 +7,11 @@ This module tests:
 4. History tracking
 """
 
-import pytest
 import sys
-import os
 from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock
 
 # Add the TradingAgents example to path for testing
-sys.path.insert(
-    0, str(Path(__file__).parent.parent / "examples" / "TradingAgents")
-)
+sys.path.insert(0, str(Path(__file__).parent.parent / "examples" / "TradingAgents"))
 
 
 class TestGovernedAgents:
@@ -99,9 +94,7 @@ class TestTradingPolicies:
         """Test RiskAnalysisChecker can be created."""
         from tradingagents.policies import RiskAnalysisChecker
 
-        checker = RiskAnalysisChecker(
-            name="test_risk", min_risk_assessments=5
-        )
+        checker = RiskAnalysisChecker(name="test_risk", min_risk_assessments=5)
 
         assert checker.name == "test_risk"
         assert checker.min_risk_assessments == 5
@@ -182,9 +175,7 @@ class TestPolicyRouterBehavior:
         from tradingagents.policies import ConfidenceRouter
         from arbiteros_alpha.history import History
 
-        router = ConfidenceRouter(
-            name="test", threshold=0.7, target="Market Analyst"
-        )
+        router = ConfidenceRouter(name="test", threshold=0.7, target="Market Analyst")
         history = History()
 
         result = router.route_after(history)
@@ -270,9 +261,7 @@ class TestPolicyConfiguration:
         arbiter_os.add_policy_checker(
             AnalystCompletionChecker(name="analyst", required_analysts={"market"})
         )
-        arbiter_os.add_policy_checker(
-            DebateRoundsChecker(name="debate", min_rounds=1)
-        )
+        arbiter_os.add_policy_checker(DebateRoundsChecker(name="debate", min_rounds=1))
 
         assert len(arbiter_os.policy_checkers) == 2
 
@@ -295,9 +284,7 @@ class TestPolicyConfiguration:
         arbiter_os.add_policy_checker(
             AnalystCompletionChecker(name="analyst", required_analysts={"market"})
         )
-        arbiter_os.add_policy_checker(
-            DebateRoundsChecker(name="debate", min_rounds=1)
-        )
+        arbiter_os.add_policy_checker(DebateRoundsChecker(name="debate", min_rounds=1))
         arbiter_os.add_policy_checker(
             RiskAnalysisChecker(name="risk", min_risk_assessments=3)
         )

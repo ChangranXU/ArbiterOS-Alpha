@@ -22,7 +22,6 @@ from arbiteros_alpha import ArbiterOSAlpha
 import arbiteros_alpha.instructions as Instr
 
 
-
 # =============================================================================
 # State Definition
 # =============================================================================
@@ -83,8 +82,8 @@ planner = None
 replanner = None
 
 
-
 os = ArbiterOSAlpha(backend="langgraph")
+
 
 def initialize_llm(api_key: str, base_url: str, model: str = "gpt-4o"):
     """Initialize the LLM components with custom API settings.
@@ -158,7 +157,9 @@ async def execute_step(state: PlanExecute):
     task = plan[0]
     task_formatted = f"""For the following plan:
 {plan_str}\n\nYou are tasked with executing step {1}, {task}."""
-    agent_response = await agent_executor.ainvoke({"messages": [("user", task_formatted)]})
+    agent_response = await agent_executor.ainvoke(
+        {"messages": [("user", task_formatted)]}
+    )
     return {
         "past_steps": [(task, agent_response["messages"][-1].content)],
     }
@@ -263,7 +264,9 @@ async def main():
     import os
 
     # Get API configuration from environment or use defaults
-    api_key = os.environ.get("OPENAI_API_KEY", "sk-SWslLpubFhsK9zXTNqZTjdvQI1r3AFLT3Nsc4Y6DVSkpfSv7")
+    api_key = os.environ.get(
+        "OPENAI_API_KEY", "sk-SWslLpubFhsK9zXTNqZTjdvQI1r3AFLT3Nsc4Y6DVSkpfSv7"
+    )
     base_url = os.environ.get("OPENAI_BASE_URL", "https://a.fe8.cn/v1")
     model = os.environ.get("OPENAI_MODEL", "gpt-4o")
 

@@ -297,7 +297,9 @@ class TestAgentParser:
         should_end_func = next(f for f in result.functions if f.name == "should_end")
         assert should_end_func.is_async is False
 
-    def test_parse_source_handles_mixed_sync_async(self, sample_mixed_sync_async_source):
+    def test_parse_source_handles_mixed_sync_async(
+        self, sample_mixed_sync_async_source
+    ):
         """Test that both sync and async functions are extracted correctly."""
         parser = AgentParser()
         result = parser.parse_source(sample_mixed_sync_async_source)

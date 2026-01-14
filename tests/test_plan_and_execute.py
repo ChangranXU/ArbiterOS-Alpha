@@ -10,10 +10,9 @@ Tests cover:
 - ArbiterOS decoration
 """
 
-import asyncio
 import operator
 from typing import Annotated, List, Literal, Tuple, Union
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from langgraph.graph import END, START, StateGraph
@@ -52,9 +51,7 @@ class Response(BaseModel):
 class Act(BaseModel):
     """Action model for tests."""
 
-    action: Union[Response, Plan] = Field(
-        description="Action to perform."
-    )
+    action: Union[Response, Plan] = Field(description="Action to perform.")
 
 
 # ============================================================================
@@ -91,6 +88,7 @@ class TestOriginalPlanAndExecute:
     @pytest.mark.asyncio
     async def test_plan_step_creates_plan(self, mock_planner):
         """Test that plan_step correctly creates a plan."""
+
         async def plan_step(state: PlanExecute):
             """Create an initial plan."""
             plan = await mock_planner.ainvoke({"messages": [("user", state["input"])]})
@@ -106,6 +104,7 @@ class TestOriginalPlanAndExecute:
     @pytest.mark.asyncio
     async def test_execute_step_executes_task(self, mock_agent_executor):
         """Test that execute_step correctly executes a task."""
+
         async def execute_step(state: PlanExecute):
             """Execute a plan step."""
             plan = state["plan"]
@@ -133,6 +132,7 @@ class TestOriginalPlanAndExecute:
     @pytest.mark.asyncio
     async def test_replan_step_returns_response(self, mock_replanner):
         """Test that replan_step returns response when complete."""
+
         async def replan_step(state: PlanExecute):
             """Replan based on results."""
             output = await mock_replanner.ainvoke(state)
@@ -154,25 +154,44 @@ class TestOriginalPlanAndExecute:
 
     def test_should_end_returns_end_when_response_present(self):
         """Test that should_end returns END when response is present."""
+
         def should_end(state: PlanExecute) -> Literal["agent", "__end__"]:
             if "response" in state and state["response"]:
                 return END
             else:
                 return "agent"
 
-        state_with_response = {"input": "", "plan": [], "past_steps": [], "response": "Answer"}
-        state_without_response = {"input": "", "plan": [], "past_steps": [], "response": ""}
+        state_with_response = {
+            "input": "",
+            "plan": [],
+            "past_steps": [],
+            "response": "Answer",
+        }
+        state_without_response = {
+            "input": "",
+            "plan": [],
+            "past_steps": [],
+            "response": "",
+        }
 
         assert should_end(state_with_response) == END
         assert should_end(state_without_response) == "agent"
 
     def test_graph_compilation(self):
         """Test that the graph compiles correctly."""
+
         # Define minimal node functions
-        async def plan_step(state): return {"plan": ["step"]}
-        async def execute_step(state): return {"past_steps": [("step", "done")]}
-        async def replan_step(state): return {"response": "done"}
-        def should_end(state): return END if state.get("response") else "agent"
+        async def plan_step(state):
+            return {"plan": ["step"]}
+
+        async def execute_step(state):
+            return {"past_steps": [("step", "done")]}
+
+        async def replan_step(state):
+            return {"response": "done"}
+
+        def should_end(state):
+            return END if state.get("response") else "agent"
 
         # Build graph (same structure as original)
         workflow = StateGraph(PlanExecute)
@@ -201,6 +220,7 @@ class TestTransformedPlanAndExecute:
     def arbiter_os(self):
         """Create ArbiterOS instance for testing."""
         from arbiteros_alpha import ArbiterOSAlpha
+
         return ArbiterOSAlpha(backend="langgraph")
 
     @pytest.fixture
@@ -328,15 +348,19 @@ class TestTransformedPlanAndExecute:
         import arbiteros_alpha.instructions as Instr
 
         @arbiter_os.instruction(Instr.DECOMPOSE)
-        async def plan_step(state): return {"plan": ["step"]}
+        async def plan_step(state):
+            return {"plan": ["step"]}
 
         @arbiter_os.instruction(Instr.TOOL_CALL)
-        async def execute_step(state): return {"past_steps": [("step", "done")]}
+        async def execute_step(state):
+            return {"past_steps": [("step", "done")]}
 
         @arbiter_os.instruction(Instr.DECOMPOSE)
-        async def replan_step(state): return {"response": "done"}
+        async def replan_step(state):
+            return {"response": "done"}
 
-        def should_end(state): return END if state.get("response") else "agent"
+        def should_end(state):
+            return END if state.get("response") else "agent"
 
         # Build graph
         workflow = StateGraph(PlanExecute)
@@ -355,6 +379,7 @@ class TestTransformedPlanAndExecute:
         assert app is not None
         # The registration is done via global _pregel_to_arbiter_map
         from arbiteros_alpha.core import _pregel_to_arbiter_map
+
         assert app in _pregel_to_arbiter_map
 
 
@@ -384,14 +409,13 @@ class TestEquivalence:
     def mock_agent(self):
         """Mock agent executor with deterministic output."""
         mock = AsyncMock()
-        mock.ainvoke.return_value = {
-            "messages": [MagicMock(content="Executed")]
-        }
+        mock.ainvoke.return_value = {"messages": [MagicMock(content="Executed")]}
         return mock
 
     @pytest.mark.asyncio
     async def test_plan_step_equivalence(self, mock_planner):
         """Test that original and transformed plan_step produce same results."""
+
         # Original version
         async def original_plan_step(state: PlanExecute):
             plan = await mock_planner.ainvoke({"messages": [("user", state["input"])]})
@@ -419,6 +443,7 @@ class TestEquivalence:
     @pytest.mark.asyncio
     async def test_execute_step_equivalence(self, mock_agent):
         """Test that original and transformed execute_step produce same results."""
+
         # Original version
         async def original_execute_step(state: PlanExecute):
             task = state["plan"][0]
@@ -456,6 +481,7 @@ class TestEquivalence:
     @pytest.mark.asyncio
     async def test_replan_step_equivalence(self, mock_replanner):
         """Test that original and transformed replan_step produce same results."""
+
         # Original version
         async def original_replan_step(state: PlanExecute):
             output = await mock_replanner.ainvoke(state)

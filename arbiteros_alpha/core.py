@@ -283,7 +283,7 @@ class ArbiterOSAlpha:
                     history_item.output_state = result
 
                     history_item.route_policy_results, destination = self._route_after()
-                    
+
                     # Evaluate node execution quality
                     if self.evaluators:
                         history_item.evaluation_results = self._evaluate_node()
@@ -320,7 +320,6 @@ class ArbiterOSAlpha:
                         f"Instruction {instruction_type.name} returned: {result}"
                     )
                     history_item.output_state = result
-
 
                     history_item.route_policy_results, destination = self._route_after()
 

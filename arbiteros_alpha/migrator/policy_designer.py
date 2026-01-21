@@ -174,13 +174,9 @@ class PolicyDesigner:
             workflow_section += f"- Description: {stage.description}\n"
             workflow_section += f"- Roles: {', '.join(stage.agent_roles)}\n"
             if stage.preconditions:
-                workflow_section += (
-                    f"- Preconditions: {', '.join(stage.preconditions)}\n"
-                )
+                workflow_section += f"- Preconditions: {', '.join(stage.preconditions)}\n"
             if stage.postconditions:
-                workflow_section += (
-                    f"- Postconditions: {', '.join(stage.postconditions)}\n"
-                )
+                workflow_section += f"- Postconditions: {', '.join(stage.postconditions)}\n"
 
         # Format key constraints
         constraints_section = "\n### Key Constraints\n"
@@ -193,7 +189,9 @@ class PolicyDesigner:
         for c in classifications.classifications:
             risk_level = self._assess_node_risk(c)
             risk_marker = " [HIGH-RISK]" if risk_level == "high" else ""
-            classifications_section += f"- {c.function_name}: {c.instruction_type.value} ({c.core.value}){risk_marker}\n"
+            classifications_section += (
+                f"- {c.function_name}: {c.instruction_type.value} ({c.core.value}){risk_marker}\n"
+            )
             if risk_level == "high":
                 high_risk_nodes.append(c.function_name)
 

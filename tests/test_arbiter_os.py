@@ -252,8 +252,12 @@ class TestArbiterOSAlpha:
             return {"result": "success"}
 
         # Act
-        os.history.enter_next_superstep(["test_func"])
-        result = test_func({"input": "data"})
+        @os.rollout()
+        def run_test():
+            os.history.enter_next_superstep(["test_func"])
+            return test_func({"input": "data"})
+
+        result = run_test()
 
         # Assert
         assert len(os.history.entries) == 1
@@ -293,10 +297,14 @@ class TestArbiterOSAlpha:
             return {"step": "b"}
 
         # Act
-        os.history.enter_next_superstep(["func_a"])
-        func_a({})
-        os.history.enter_next_superstep(["func_b"])
-        func_b({})
+        @os.rollout()
+        def run_test():
+            os.history.enter_next_superstep(["func_a"])
+            func_a({})
+            os.history.enter_next_superstep(["func_b"])
+            func_b({})
+
+        run_test()
 
         # Assert
         assert len(os.history.entries) == 2
@@ -316,8 +324,12 @@ class TestArbiterOSAlpha:
             return {"confidence": 0.3}
 
         # Act
-        os.history.enter_next_superstep(["evaluate"])
-        result = evaluate({})
+        @os.rollout()
+        def run_test():
+            os.history.enter_next_superstep(["evaluate"])
+            return evaluate({})
+
+        result = run_test()
 
         # Assert
         from langgraph.types import Command
@@ -340,8 +352,12 @@ class TestArbiterOSAlpha:
             return {"confidence": 0.8}
 
         # Act
-        os.history.enter_next_superstep(["evaluate"])
-        result = evaluate({})
+        @os.rollout()
+        def run_test():
+            os.history.enter_next_superstep(["evaluate"])
+            return evaluate({})
+
+        result = run_test()
 
         # Assert
         assert result == {"confidence": 0.8}
@@ -359,8 +375,12 @@ class TestArbiterOSAlpha:
         before_time = datetime.datetime.now()
 
         # Act
-        os.history.enter_next_superstep(["test_func"])
-        test_func({})
+        @os.rollout()
+        def run_test():
+            os.history.enter_next_superstep(["test_func"])
+            test_func({})
+
+        run_test()
 
         after_time = datetime.datetime.now()
 
@@ -387,12 +407,16 @@ class TestArbiterOSAlpha:
             return {"step": 3}
 
         # Act
-        os.history.enter_next_superstep(["first"])
-        first({})
-        os.history.enter_next_superstep(["second"])
-        second({})
-        os.history.enter_next_superstep(["third"])
-        third({})
+        @os.rollout()
+        def run_test():
+            os.history.enter_next_superstep(["first"])
+            first({})
+            os.history.enter_next_superstep(["second"])
+            second({})
+            os.history.enter_next_superstep(["third"])
+            third({})
+
+        run_test()
 
         # Assert
         assert len(os.history.entries) == 3
@@ -436,65 +460,6 @@ class TestArbiterOSAlpha:
             @os.instruction(WrongEnum.WRONG)  # type: ignore
             def invalid_func(state: dict[str, Any]) -> dict[str, Any]:
                 return state
-
-    @pytest.mark.asyncio
-    async def test_instruction_decorator_with_async_function(self):
-        """Test that instruction decorator works with async functions."""
-        # Arrange
-        os = ArbiterOSAlpha()
-
-        @os.instruction(CognitiveCore.GENERATE)
-        async def async_generate(state: dict[str, Any]) -> dict[str, Any]:
-            return {"result": "async_success"}
-
-        # Act
-        os.history.enter_next_superstep(["async_generate"])
-        result = await async_generate({"input": "data"})
-
-        # Assert
-        assert result == {"result": "async_success"}
-        assert len(os.history.entries) == 1
-        assert os.history.entries[0][0].instruction == CognitiveCore.GENERATE
-        assert os.history.entries[0][0].input_state == {"input": "data"}
-        assert os.history.entries[0][0].output_state == {"result": "async_success"}
-
-    @pytest.mark.asyncio
-    async def test_instruction_decorator_async_preserves_function_name(self):
-        """Test that decorator preserves original function name for async functions."""
-        # Arrange
-        os = ArbiterOSAlpha()
-
-        @os.instruction(CognitiveCore.GENERATE)
-        async def my_async_function(state: dict[str, Any]) -> dict[str, Any]:
-            return state
-
-        # Assert
-        assert my_async_function.__name__ == "my_async_function"
-
-    @pytest.mark.asyncio
-    async def test_instruction_decorator_async_with_router_trigger(self):
-        """Test async instruction decorator with routing."""
-        # Arrange
-        os = ArbiterOSAlpha()
-        router = MetricThresholdPolicyRouter(
-            name="retry_router", key="confidence", threshold=0.5, target="retry"
-        )
-        os.add_policy_router(router)
-
-        @os.instruction(MetacognitiveCore.EVALUATE_PROGRESS)
-        async def async_evaluate(state: dict[str, Any]) -> dict[str, Any]:
-            return {"confidence": 0.3}
-
-        # Act
-        os.history.enter_next_superstep(["async_evaluate"])
-        result = await async_evaluate({})
-
-        # Assert
-        from langgraph.types import Command
-
-        assert isinstance(result, Command)
-        assert result.update == {"confidence": 0.3}
-        assert result.goto == "retry"
 
 
 class TestHistory:

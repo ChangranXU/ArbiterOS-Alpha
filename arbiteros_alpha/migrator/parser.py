@@ -52,6 +52,7 @@ class ParsedAgent:
         has_existing_arbiteros: True if file already has ArbiterOS imports.
         has_register_compiled_graph: True if file already has register_compiled_graph call.
         has_os_initialization: True if file already has ArbiterOSAlpha() initialization.
+        compile_in_return: True if compile() is in a return statement (needs special handling).
     """
 
     agent_type: Literal["langgraph", "vanilla"]
@@ -64,6 +65,7 @@ class ParsedAgent:
     has_existing_arbiteros: bool = False
     has_register_compiled_graph: bool = False
     has_os_initialization: bool = False
+    compile_in_return: bool = False
 
 
 class AgentParser:
@@ -168,7 +170,8 @@ class AgentParser:
                 if self._is_arbiteros_init_call(node):
                     has_os_initialization = True
 
-        # Find compile assignment (graph = builder.compile())
+        # Find compile assignment (graph = builder.compile()) or return (return workflow.compile())
+        compile_in_return = False
         for node in ast.walk(tree):
             if isinstance(node, ast.Assign):
                 if isinstance(node.value, ast.Call) and self._is_compile_call(
@@ -177,6 +180,12 @@ class AgentParser:
                     if node.targets and isinstance(node.targets[0], ast.Name):
                         graph_variable = node.targets[0].id
                         compile_lineno = node.lineno
+            elif isinstance(node, ast.Return):
+                if isinstance(node.value, ast.Call) and self._is_compile_call(
+                    node.value
+                ):
+                    compile_lineno = node.lineno
+                    compile_in_return = True
 
         # Find where imports end
         for node in ast.iter_child_nodes(tree):
@@ -214,6 +223,7 @@ class AgentParser:
             has_existing_arbiteros=has_existing_arbiteros,
             has_register_compiled_graph=has_register_compiled_graph,
             has_os_initialization=has_os_initialization,
+            compile_in_return=compile_in_return,
         )
 
     def _is_state_graph_call(self, node: ast.Call) -> bool:

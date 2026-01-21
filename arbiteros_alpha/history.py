@@ -28,7 +28,7 @@ class HistoryItem:
     timestamp: datetime.datetime
     instruction: InstructionType
     input_state: dict[str, Any]
-    output_state: dict[str, Any] = field(default_factory=dict)
+    output_state: Any = field(default_factory=dict)
     check_policy_results: dict[str, bool] = field(default_factory=dict)
     route_policy_results: dict[str, str | None] = field(default_factory=dict)
     evaluation_results: dict[str, "EvaluationResult"] = field(default_factory=dict)
@@ -56,7 +56,7 @@ class History:
                 "All nodes for the current superstep have already recorded entries.\n"
                 "Hint: Did you forget to call \n"
                 "    - register_compiled_graph() for langgraph backend or \n"
-                "    - enter_next_superstep() for vanilla backend?"
+                "    - enter_next_superstep() for native backend?"
             )
         self.entries[-1].append(entry)
 

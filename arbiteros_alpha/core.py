@@ -11,13 +11,24 @@ import logging
 import weakref
 from typing import Any, Callable, Literal
 
+from langfuse import Langfuse
 from langgraph.pregel import Pregel, _loop
 from langgraph.types import Command
 
-from .history import History, HistoryItem
-from .instructions import InstructionType
-from .policy import PolicyChecker, PolicyRouter
 from .evaluation import EvaluationResult, NodeEvaluator
+from .history import History, HistoryItem
+from .instructions import (
+    AdaptiveCore,
+    AffectiveCore,
+    CognitiveCore,
+    ExecutionCore,
+    InstructionType,
+    MemoryCore,
+    MetacognitiveCore,
+    NormativeCore,
+    SocialCore,
+)
+from .policy import PolicyChecker, PolicyRouter
 
 logger = logging.getLogger(__name__)
 
@@ -55,22 +66,41 @@ class ArbiterOSAlpha:
         ```
     """
 
-    def __init__(self, backend: Literal["langgraph", "vanilla"] = "langgraph"):
+    def __init__(
+        self, backend: Literal["langgraph", "native", "vanilla"] = "langgraph"
+    ):
         """Initialize the ArbiterOSAlpha instance.
 
         Args:
             backend: The execution backend to use.
                 - "langgraph": Use an agent based on the LangGraph framework.
-                - "vanilla": Use the framework-less ('from scratch') agent implementation.
+                - "native": Use the framework-less ('from scratch') agent implementation.
+                - "vanilla": (Deprecated) Alias for "native".
         """
-        self.backend = backend
+        if backend == "vanilla":
+            import warnings
+
+            warnings.warn(
+                "The 'vanilla' backend is deprecated and will be removed in a future version. "
+                "Please use 'native' instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            self.backend = "native"
+        else:
+            self.backend = backend
+
         self.history: History = History()
         self.policy_checkers: list[PolicyChecker] = []
         self.policy_routers: list[PolicyRouter] = []
         self.evaluators: list[NodeEvaluator] = []
+        self._in_rollout: bool = False
 
         if self.backend == "langgraph":
             self._patch_pregel_loop()
+
+        self.langfuse = Langfuse()
+        self.span = None
 
     def add_policy_checker(self, checker: PolicyChecker) -> None:
         """Register a policy checker for validation.
@@ -212,6 +242,23 @@ class ArbiterOSAlpha:
                 # Evaluation failures should not interrupt execution
         return results
 
+    def _get_observation_type(self, instruction_type: InstructionType) -> str:
+        """Maps an instruction type to a langfuse observation type."""
+        mapping = {
+            CognitiveCore: "generation",
+            MemoryCore: "chain",
+            ExecutionCore: "tool",
+            NormativeCore: "guardrail",
+            MetacognitiveCore: "evaluator",
+            AdaptiveCore: "retriever",
+            SocialCore: "chain",
+            AffectiveCore: "chain",
+        }
+        core_type = type(instruction_type)
+        if core_type not in mapping:
+            raise ValueError(f"Invalid instruction type: {instruction_type}")
+        return mapping[core_type]
+
     def instruction(
         self, instruction_type: InstructionType
     ) -> Callable[[Callable], Callable]:
@@ -220,8 +267,6 @@ class ArbiterOSAlpha:
         This decorator adds policy validation, execution history tracking,
         and dynamic routing to LangGraph node functions. It's the core
         integration point between ArbiterOS and LangGraph.
-
-        Supports both sync and async functions.
 
         Args:
             instruction_type: An instruction type from one of the Core enums
@@ -232,17 +277,13 @@ class ArbiterOSAlpha:
             A decorator function that wraps the target node function.
 
         Example:
-          ```python
+            ```python
             from arbiteros_alpha.instructions import CognitiveCore
+
             @os.instruction(CognitiveCore.GENERATE)
             def generate(state: State) -> State:
                 return {"field": "value"}
             # Function now includes policy checks and history tracking
-
-            @os.instruction(CognitiveCore.GENERATE)
-            async def async_generate(state: State) -> State:
-                return {"field": "value"}
-            # Async functions are also supported
             ```
         """
         # Validate that instruction_type is a valid InstructionType enum
@@ -252,87 +293,124 @@ class ArbiterOSAlpha:
             )
 
         def decorator(func: Callable) -> Callable:
-            # Check if the function is async
-            is_async = inspect.iscoroutinefunction(func)
-
-            if is_async:
-
-                @functools.wraps(func)
-                async def async_wrapper(*args, **kwargs) -> Any:
-                    logger.debug(
-                        f"Executing async instruction: {instruction_type.__class__.__name__}.{instruction_type.name}"
+            @functools.wraps(func)
+            def wrapper(*args, **kwargs) -> Any:
+                if not self._in_rollout:
+                    raise RuntimeError(
+                        "Instructions must be executed within a @arbiter_os.rollout context."
                     )
 
-                    history_item = HistoryItem(
-                        timestamp=datetime.datetime.now(),
-                        instruction=instruction_type,
-                        input_state=args[0],
-                    )
+                logger.debug(
+                    f"Executing instruction: {instruction_type.__class__.__name__}.{instruction_type.name}"
+                )
 
-                    if self.backend == "vanilla":
-                        self.history.enter_next_superstep([instruction_type.name])
+                # Capture input state from arguments
+                input_state = None
+                if self.backend == "native":
+                    # For native backend, capture all named arguments
+                    sig = inspect.signature(func)
+                    bound_args = sig.bind(*args, **kwargs)
+                    bound_args.apply_defaults()
+                    input_state = bound_args.arguments
+                else:
+                    # For langgraph backend, usually the first argument is the state
+                    input_state = args[0] if args else None
 
-                    self.history.add_entry(history_item)
+                history_item = HistoryItem(
+                    timestamp=datetime.datetime.now(),
+                    instruction=instruction_type,
+                    input_state=input_state,
+                )
 
-                    history_item.check_policy_results, all_passed = self._check_before()
+                if self.backend == "native":
+                    self.history.enter_next_superstep([instruction_type.name])
 
-                    result = await func(*args, **kwargs)
-                    logger.debug(
-                        f"Instruction {instruction_type.name} returned: {result}"
-                    )
-                    history_item.output_state = result
+                self.history.add_entry(history_item)
 
-                    history_item.route_policy_results, destination = self._route_after()
+                # langfuse record
+                observation_type = self._get_observation_type(instruction_type)
 
-                    # Evaluate node execution quality
-                    if self.evaluators:
-                        history_item.evaluation_results = self._evaluate_node()
-
-                    if destination:
-                        return Command(update=result, goto=destination)
-
-                    return result
-
-                return async_wrapper
-            else:
-
-                @functools.wraps(func)
-                def wrapper(*args, **kwargs) -> Any:
-                    logger.debug(
-                        f"Executing instruction: {instruction_type.__class__.__name__}.{instruction_type.name}"
-                    )
-
-                    history_item = HistoryItem(
-                        timestamp=datetime.datetime.now(),
-                        instruction=instruction_type,
-                        input_state=args[0],
-                    )
-
-                    if self.backend == "vanilla":
-                        self.history.enter_next_superstep([instruction_type.name])
-
-                    self.history.add_entry(history_item)
-
+                with self.span.start_as_current_observation(
+                    as_type=observation_type,
+                    name=func.__name__,
+                ) as generation:
                     history_item.check_policy_results, all_passed = self._check_before()
 
                     result = func(*args, **kwargs)
+
                     logger.debug(
                         f"Instruction {instruction_type.name} returned: {result}"
                     )
                     history_item.output_state = result
 
-                    history_item.route_policy_results, destination = self._route_after()
-
                     # Evaluate node execution quality
                     if self.evaluators:
                         history_item.evaluation_results = self._evaluate_node()
 
-                    if destination:
-                        return Command(update=result, goto=destination)
+                    history_item.route_policy_results, destination = self._route_after()
+                    metadata = (
+                        history_item.check_policy_results
+                        | getattr(history_item, "evaluation_results", {})
+                        | history_item.route_policy_results
+                    )
 
+                    generation.update(
+                        input=input_state, output=result, metadata=metadata
+                    )
+
+                if destination:
+                    return Command(update=result, goto=destination)
+
+                return result
+
+            return wrapper
+
+        return decorator
+
+    def rollout(self) -> Callable[[Callable], Callable]:
+        """Decorator to delimit a complete execution workflow (a 'rollout').
+
+        This decorator manages the lifecycle of a single execution trace.
+        By abandoning the concept of a session ID, this decorator treats every
+        invocation as a fresh, independent interaction.
+
+        It automatically:
+        1. Resets the execution history to ensure a clean state.
+        2. Logs the start and end of the rollout.
+
+        Usage:
+            @os.rollout()
+            def run_agent(input_data):
+                ...
+        """
+
+        def decorator(func: Callable) -> Callable:
+            @functools.wraps(func)
+            def wrapper(*args, **kwargs) -> Any:
+                if self._in_rollout:
+                    raise RuntimeError("Nested rollouts are not allowed.")
+
+                # Initialize a fresh history for this new rollout
+                self.history = History()
+                self.span = self.langfuse.start_span(name="arbiteros_alpha_record")
+                self._in_rollout = True
+                logger.info(f"--- Starting Rollout: {func.__name__} ---")
+
+                try:
+                    result = func(*args, **kwargs)
+                    logger.info(f"--- Rollout Completed: {func.__name__} ---")
                     return result
+                except Exception:
+                    logger.error(
+                        f"--- Rollout Failed: {func.__name__} ---", exc_info=True
+                    )
+                    raise
+                finally:
+                    self.span.end()
+                    self.langfuse.flush()
+                    self._in_rollout = False
 
-                return wrapper
+            return wrapper
 
         return decorator
 

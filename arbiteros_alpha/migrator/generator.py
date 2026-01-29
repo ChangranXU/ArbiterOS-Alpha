@@ -872,6 +872,22 @@ class CodeGenerator:
                     f"{', '.join(n['function_name'] for n in high_risk_nodes)}. "
                     "These nodes require verification before execution."
                 )
+
+                # Attempt automatic integration into LangGraph graph builders.
+                injected = self._inject_verification_into_graph_builders(
+                    output_repo=output_repo,
+                    high_risk_nodes=high_risk_nodes,
+                    modified_files=modified_files,
+                    warnings=warnings,
+                    dry_run=dry_run,
+                )
+                if not injected:
+                    warnings.append(
+                        "No graph-builder files were automatically patched to route through "
+                        "verification nodes. If your workflow is LangGraph-based, you may need "
+                        "to manually insert `verify_*` nodes between predecessors and high-risk "
+                        "nodes."
+                    )
         except Exception as e:
             errors.append(f"Failed to generate verification_nodes.py: {e}")
 
@@ -884,6 +900,255 @@ class CodeGenerator:
             warnings=warnings,
             summary=f"Transformed repository to {output_repo} with {len(modified_files)} modified files and {len(generated_files)} generated files",
         )
+
+    def _inject_verification_into_graph_builders(
+        self,
+        output_repo: Path,
+        high_risk_nodes: list[dict],
+        modified_files: list[str],
+        warnings: list[str],
+        dry_run: bool,
+    ) -> bool:
+        """Patch LangGraph graph builders to route through verification nodes.
+
+        This is a best-effort, text-based transformer intended to automatically
+        integrate the generated `verification_nodes.py` into common LangGraph
+        graph-builder patterns (e.g., TradingAgents).
+
+        The injected code is always wrapped in clearly labeled markers so users
+        can find (and remove) it easily.
+
+        Args:
+            output_repo: Root of the transformed repo.
+            high_risk_nodes: High-risk node metadata dicts from `_identify_high_risk_nodes`.
+            modified_files: Accumulator for modified file paths (relative to repo root).
+            warnings: Accumulator for CLI-visible messages about insert locations.
+            dry_run: If True, don't write changes.
+
+        Returns:
+            True if at least one file was patched.
+        """
+        function_names = {n["function_name"] for n in high_risk_nodes}
+
+        # TradingAgents-focused integration (GraphSetup pattern).
+        # We intentionally keep this narrow/safe: only patch when we recognize
+        # the expected structure.
+        candidate_files: list[Path] = []
+        for py_file in output_repo.rglob("*.py"):
+            if not py_file.is_file():
+                continue
+            try:
+                content = py_file.read_text(encoding="utf-8")
+            except Exception:
+                continue
+            if (
+                "class GraphSetup" in content
+                and "workflow = StateGraph" in content
+                and "workflow.add_edge(START" in content
+                and ("Research Manager" in content or "Trader" in content)
+            ):
+                candidate_files.append(py_file)
+
+        patched_any = False
+        for py_file in candidate_files:
+            patched = self._patch_tradingagents_graphsetup(
+                output_repo=output_repo,
+                file_path=py_file,
+                function_names=function_names,
+                modified_files=modified_files,
+                warnings=warnings,
+                dry_run=dry_run,
+            )
+            patched_any = patched_any or patched
+
+        return patched_any
+
+    def _patch_tradingagents_graphsetup(
+        self,
+        output_repo: Path,
+        file_path: Path,
+        function_names: set[str],
+        modified_files: list[str],
+        warnings: list[str],
+        dry_run: bool,
+    ) -> bool:
+        """Patch a TradingAgents-style `GraphSetup` file to include verification.
+
+        Args:
+            output_repo: Root of the transformed repo.
+            file_path: Path to the graph setup file in the transformed repo.
+            function_names: Set of high-risk function names (e.g. create_trader).
+            modified_files: Accumulator for modified file paths.
+            warnings: Accumulator for CLI-visible insert-location messages.
+            dry_run: If True, don't write changes.
+
+        Returns:
+            True if the file was patched.
+        """
+        content = file_path.read_text(encoding="utf-8")
+        if "INSERTED BY ARBITEROS MIGRATOR: VERIFICATION" in content:
+            return False
+
+        lines = content.splitlines()
+
+        def _find_line_index(needle: str) -> int | None:
+            for i, line in enumerate(lines):
+                if needle in line:
+                    return i
+            return None
+
+        # 1) Insert verification imports.
+        import_anchor = "from tradingagents.agents.governed_agents import get_arbiter_os"
+        import_idx = _find_line_index(import_anchor)
+        if import_idx is None:
+            return False
+
+        verification_import_block = [
+            "",
+            "# === INSERTED BY ARBITEROS MIGRATOR: VERIFICATION IMPORTS START ===",
+            "from verification_nodes import (",
+            "    create_verification_router,",
+            "    human_review_node,",
+            "    verify_create_research_manager,",
+            "    verify_create_trader,",
+            "    verify_init_ticker,",
+            ")",
+            "# === INSERTED BY ARBITEROS MIGRATOR: VERIFICATION IMPORTS END ===",
+        ]
+        lines[import_idx + 1 : import_idx + 1] = verification_import_block
+
+        # 2) Insert verification nodes after workflow creation.
+        workflow_idx = _find_line_index("workflow = StateGraph")
+        if workflow_idx is None:
+            return False
+
+        verification_nodes_block = [
+            "",
+            "        # === INSERTED BY ARBITEROS MIGRATOR: VERIFICATION NODES START ===",
+            "        workflow.add_node(\"verify_init_ticker\", verify_init_ticker)",
+            "        workflow.add_node(\"verify_create_research_manager\", verify_create_research_manager)",
+            "        workflow.add_node(\"verify_create_trader\", verify_create_trader)",
+            "        workflow.add_node(\"human_review\", human_review_node)",
+            "        # === INSERTED BY ARBITEROS MIGRATOR: VERIFICATION NODES END ===",
+        ]
+        lines[workflow_idx + 1 : workflow_idx + 1] = verification_nodes_block
+
+        # 3) Gate START -> first analyst through verify_init_ticker (if present).
+        if "init_ticker" in function_names:
+            start_edge_idx = None
+            start_target = None
+            for i, line in enumerate(lines):
+                if "workflow.add_edge(START," in line:
+                    start_edge_idx = i
+                    # Keep the original target expression intact (supports f-strings).
+                    start_target = line.split("workflow.add_edge(START,", 1)[1].strip()
+                    if start_target.endswith(")"):
+                        start_target = start_target[:-1].strip()
+                    break
+            if start_edge_idx is not None and start_target is not None:
+                indent = lines[start_edge_idx].split("workflow.add_edge", 1)[0]
+                gated_start_block = [
+                    f"{indent}# === INSERTED BY ARBITEROS MIGRATOR: VERIFICATION START EDGE START ===",
+                    f"{indent}workflow.add_edge(START, \"verify_init_ticker\")",
+                    f"{indent}workflow.add_conditional_edges(",
+                    f"{indent}    \"verify_init_ticker\",",
+                    f"{indent}    create_verification_router(",
+                    f"{indent}        approved_target={start_target.strip()},",
+                    f"{indent}        rejected_target=\"human_review\",",
+                    f"{indent}    ),",
+                    f"{indent}    {{",
+                    f"{indent}        {start_target.strip()}: {start_target.strip()},",
+                    f"{indent}        \"human_review\": \"human_review\",",
+                    f"{indent}    }},",
+                    f"{indent})",
+                    f"{indent}# === INSERTED BY ARBITEROS MIGRATOR: VERIFICATION START EDGE END ===",
+                ]
+                lines[start_edge_idx : start_edge_idx + 1] = gated_start_block
+
+        # 4) Route Bull/Bear conditional edges targeting Research Manager via verify node.
+        if "create_research_manager" in function_names:
+            lines = [
+                line.replace(
+                    '"Research Manager": "Research Manager"',
+                    '"Research Manager": "verify_create_research_manager"',
+                )
+                for line in lines
+            ]
+
+            # Insert conditional edges for the verification node after debate wiring.
+            insert_after = _find_line_index("workflow.add_conditional_edges(")
+            # Find a stable anchor: the first direct edge from Research Manager.
+            anchor_idx = _find_line_index('workflow.add_edge("Research Manager"')
+            if anchor_idx is not None:
+                indent = lines[anchor_idx].split("workflow.add_edge", 1)[0]
+                verify_rm_block = [
+                    f"{indent}# === INSERTED BY ARBITEROS MIGRATOR: VERIFY RESEARCH MANAGER START ===",
+                    f"{indent}workflow.add_conditional_edges(",
+                    f"{indent}    \"verify_create_research_manager\",",
+                    f"{indent}    create_verification_router(",
+                    f"{indent}        approved_target=\"Research Manager\",",
+                    f"{indent}        rejected_target=\"human_review\",",
+                    f"{indent}    ),",
+                    f"{indent}    {{",
+                    f"{indent}        \"Research Manager\": \"Research Manager\",",
+                    f"{indent}        \"human_review\": \"human_review\",",
+                    f"{indent}    }},",
+                    f"{indent})",
+                    f"{indent}# === INSERTED BY ARBITEROS MIGRATOR: VERIFY RESEARCH MANAGER END ===",
+                    "",
+                ]
+                lines[anchor_idx:anchor_idx] = verify_rm_block
+
+        # 5) Insert verify_create_trader between Research Manager -> Trader if present.
+        if "create_trader" in function_names:
+            for i, line in enumerate(lines):
+                if 'workflow.add_edge("Research Manager", "Trader")' in line:
+                    indent = line.split("workflow.add_edge", 1)[0]
+                    verify_trader_block = [
+                        f"{indent}# === INSERTED BY ARBITEROS MIGRATOR: VERIFY TRADER START ===",
+                        f"{indent}workflow.add_edge(\"Research Manager\", \"verify_create_trader\")",
+                        f"{indent}workflow.add_conditional_edges(",
+                        f"{indent}    \"verify_create_trader\",",
+                        f"{indent}    create_verification_router(",
+                        f"{indent}        approved_target=\"Trader\",",
+                        f"{indent}        rejected_target=\"human_review\",",
+                        f"{indent}    ),",
+                        f"{indent}    {{",
+                        f"{indent}        \"Trader\": \"Trader\",",
+                        f"{indent}        \"human_review\": \"human_review\",",
+                        f"{indent}    }},",
+                        f"{indent})",
+                        f"{indent}# === INSERTED BY ARBITEROS MIGRATOR: VERIFY TRADER END ===",
+                    ]
+                    lines[i : i + 1] = verify_trader_block
+                    break
+
+        # 6) Ensure human_review terminates safely if present.
+        end_idx = _find_line_index("workflow.add_edge(\"Risk Judge\", END)")
+        if end_idx is not None:
+            indent = lines[end_idx].split("workflow.add_edge", 1)[0]
+            lines[end_idx + 1 : end_idx + 1] = [
+                f"{indent}# === INSERTED BY ARBITEROS MIGRATOR: HUMAN REVIEW TERMINATION START ===",
+                f"{indent}workflow.add_edge(\"human_review\", END)",
+                f"{indent}# === INSERTED BY ARBITEROS MIGRATOR: HUMAN REVIEW TERMINATION END ===",
+            ]
+
+        new_content = "\n".join(lines) + "\n"
+        if not dry_run:
+            file_path.write_text(new_content, encoding="utf-8")
+
+        rel = str(file_path.relative_to(output_repo))
+        if rel not in modified_files:
+            modified_files.append(rel)
+
+        warnings.append(
+            "Inserted verification-node routing into "
+            f"{rel}. Find inserted code at markers: "
+            "'VERIFICATION IMPORTS START', 'VERIFICATION NODES START', "
+            "'VERIFICATION START EDGE START', 'VERIFY RESEARCH MANAGER START', "
+            "'VERIFY TRADER START'."
+        )
+        return True
 
     def _find_agents_directory(
         self, repo_path: Path, analysis: RepoAnalysisOutput
